@@ -1,0 +1,13 @@
+{
+  "name": "stock-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Монитор акций MOEX: теханализ, идеи, портфель, калькулятор пассивного дохода, сигналы резких падений",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

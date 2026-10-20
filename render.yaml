@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: moex-monitor
+    runtime: node
+    plan: free
+    startCommand: npm start
+    healthCheckPath: /api/health
