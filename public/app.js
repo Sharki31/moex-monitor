@@ -683,6 +683,74 @@ function openAnalysis(secid) {
   runAnalysis(secid);
 }
 
+let aiHistory = [];
+let aiBusy = false;
+let aiEnabled = null;
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function renderAiChat(typing) {
+  const box = $('#ai-chat');
+  let html = aiHistory.map((m) =>
+    '<div class="msg ' + (m.role === 'user' ? 'msg-user' : 'msg-bot') + '">' +
+    esc(m.content).replace(/\n/g, '<br>') + '</div>').join('');
+  if (typing) html += '<div class="msg msg-bot msg-typing">Думаю…</div>';
+  if (!html) {
+    html = '<div class="msg msg-bot">Привет! Я помощник по акциям. Спроси, что лучше купить из идей и почему, ' +
+      'или упомяни тикер — расскажу, что видно по бумаге прямо сейчас.</div>';
+  }
+  box.innerHTML = html;
+  box.scrollTop = box.scrollHeight;
+}
+
+async function initAi() {
+  try {
+    const d = await api('/api/ai/status');
+    aiEnabled = !!d.enabled;
+  } catch {
+    aiEnabled = false;
+  }
+  if (!aiEnabled) {
+    $('#ai-text').disabled = true;
+    $('#btn-ai-send').disabled = true;
+    $$('#ai-panel .ai-suggest button').forEach((b) => { b.disabled = true; });
+    $('#ai-error').textContent = 'Помощник не настроен: нужен бесплатный API-ключ (GigaChat или ЯндексGPT). Инструкция — в README, раздел «ИИ-помощник».';
+  }
+  renderAiChat(false);
+}
+
+async function sendAi(text) {
+  const msg = (text || $('#ai-text').value || '').trim();
+  if (!msg || aiBusy || aiEnabled === false) return;
+  $('#ai-text').value = '';
+  aiHistory.push({ role: 'user', content: msg });
+  renderAiChat(true);
+  aiBusy = true;
+  $('#btn-ai-send').disabled = true;
+  try {
+    const res = await fetch('/api/ai/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: msg,
+        history: aiHistory.slice(0, -1).slice(-6),
+        portfolio: portfolio.map((p) => ({ secid: p.secid, qty: p.qty, buyPrice: p.buyPrice, divPerShare: p.divPerShare })),
+      }),
+    });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(d.error || ('HTTP ' + res.status));
+    aiHistory.push({ role: 'assistant', content: String(d.answer || '(пустой ответ)') });
+  } catch (e) {
+    aiHistory.push({ role: 'assistant', content: 'Ошибка: ' + e.message });
+  } finally {
+    aiBusy = false;
+    $('#btn-ai-send').disabled = aiEnabled === false;
+    renderAiChat(false);
+  }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
   $$('.tab').forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.tab)));
@@ -756,6 +824,16 @@ document.addEventListener('DOMContentLoaded', () => {
   renderAlerts();
   pollAlerts();
   setInterval(pollAlerts, 60000);
+  $('#btn-ai').addEventListener('click', () => {
+    const p = $('#ai-panel');
+    p.hidden = !p.hidden;
+    if (!p.hidden) $('#ai-text').focus();
+  });
+  $('#btn-ai-send').addEventListener('click', () => sendAi());
+  $('#ai-text').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendAi(); });
+  $('#btn-ai-clear').addEventListener('click', () => { aiHistory = []; renderAiChat(false); });
+  $$('#ai-panel .ai-suggest button').forEach((b) => b.addEventListener('click', () => sendAi(b.dataset.q)));
+  initAi();
   loadCalcInputs();
   $$('#tab-portfolio .calc-grid input').forEach((inp) => inp.addEventListener('input', () => {
     saveCalcInputs();

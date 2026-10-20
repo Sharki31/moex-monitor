@@ -10,6 +10,7 @@ const analysis = require('./lib/analysis');
 const forecast = require('./lib/forecast');
 const newsMod = require('./lib/news');
 const alerts = require('./lib/alerts');
+const ai = require('./lib/ai');
 
 const PORT = process.env.PORT || 3000;
 const HOST = '0.0.0.0';
@@ -102,6 +103,198 @@ function reasonText(a, drawdownPct) {
   return parts.join(', ');
 }
 
+async function buildIdeas(limit) {
+  const secs = await getSecurities();
+  let feed = null;
+  try {
+    feed = await newsMod.getFeed();
+  } catch {}
+  const universe = secs.rows
+    .filter((s) => s.issueSize != null && s.price != null)
+    .map((s) => ({ ...s, marketCap: s.issueSize * s.price }))
+    .sort((a, b) => b.marketCap - a.marketCap)
+    .slice(0, 40);
+  const results = [];
+  let idx = 0;
+  async function worker() {
+    while (idx < universe.length) {
+      const s = universe[idx++];
+      let d;
+      try {
+        d = await getCandles(s.secid, 730, 30 * MIN);
+      } catch {
+        continue;
+      }
+      if (!d.candles || d.candles.length < 30) continue;
+      const a = analysis.analyze(d.candles);
+      const cutoff = new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10);
+      let yearMax = 0;
+      for (const c of d.candles) {
+        if (c.t >= cutoff && c.c > yearMax) yearMax = c.c;
+      }
+      const drawdownPct = yearMax ? (s.price / yearMax - 1) * 100 : null;
+      const na = feed ? newsMod.matchCompany(feed.items, s.secid) : null;
+      let adv = advice(a, drawdownPct);
+      if (na && na.score <= -2 && adv.k === 'buy') adv = { k: 'wait', t: 'Понаблюдай', gate: 'news' };
+      let reason = reasonText(a, drawdownPct);
+      if (adv.gate === 'fall') reason += '; цена ещё ниже средней за 20 дней — падение не остановилось';
+      if (adv.gate === 'news') reason += '; новостной фон негативный';
+      results.push({
+        secid: s.secid,
+        name: s.name,
+        price: s.price,
+        changePct: s.changePct,
+        marketCap: s.marketCap,
+        score: a.score,
+        verdict: a.verdict,
+        rsi: a.rsi == null ? null : +a.rsi.toFixed(1),
+        drawdownPct: drawdownPct == null ? null : +drawdownPct.toFixed(1),
+        newsScore: na ? na.score : null,
+        newsPos: na ? na.pos : null,
+        newsNeg: na ? na.neg : null,
+        newsTitle: na && na.matched[0] ? na.matched[0].title : null,
+        advice: adv.t,
+        adviceKey: adv.k,
+        adviceGate: adv.gate || null,
+        reason,
+      });
+    }
+  }
+  await Promise.all(Array.from({ length: 6 }, worker));
+  const order = { buy: 0, small: 1, hold: 2, wait: 3, avoid: 4 };
+  results.sort((x, y) => (order[x.adviceKey] - order[y.adviceKey]) || (y.score - x.score));
+  return {
+    scanned: results.length,
+    stale: secs.stale,
+    newsSources: feed ? feed.sources.join(', ') : '',
+    newsErrors: feed ? feed.errors : [],
+    results: results.slice(0, limit),
+  };
+}
+
+function readJsonBody(req, limit = 64 * 1024) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) {
+        reject(new Error('Слишком большой запрос'));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'));
+      } catch {
+        reject(new Error('Некорректный JSON'));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+async function buildAiContext(message, portfolio) {
+  const secs = await getSecurities();
+  const low = ' ' + message.toLowerCase() + ' ';
+  const upper = ' ' + message.toUpperCase() + ' ';
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const focusSecs = [];
+  for (const s of secs.rows) {
+    if (focusSecs.length >= 3) break;
+    let hit = false;
+    if (s.secid.length >= 2 && new RegExp('(^|[^A-Za-z0-9-])' + esc(s.secid) + '($|[^A-Za-z0-9-])').test(upper)) hit = true;
+    if (!hit && s.name && s.name.length >= 5 && low.includes(s.name.toLowerCase())) hit = true;
+    if (hit && !focusSecs.some((x) => x.secid === s.secid)) focusSecs.push(s);
+  }
+  const ideasData = await buildIdeas(8);
+  const focus = [];
+  for (const s of focusSecs) {
+    try {
+      const d = await getCandles(s.secid, 730, 60 * MIN);
+      if (!d.candles || !d.candles.length) continue;
+      const a = analysis.analyze(d.candles);
+      const f = forecast.forecast(d.candles);
+      let news = null;
+      try {
+        const feed = await newsMod.getFeed();
+        const na = newsMod.matchCompany(feed.items, s.secid);
+        if (na) news = { score: na.score, pos: na.pos, neg: na.neg, titles: na.matched.slice(0, 3).map((n) => String(n.title)) };
+      } catch {}
+      const last = f && f.points && f.points[f.points.length - 1];
+      focus.push({
+        secid: s.secid,
+        name: s.name,
+        price: s.price,
+        analysis: {
+          verdict: a.verdict,
+          score: a.score,
+          rsi: a.rsi == null ? null : +a.rsi.toFixed(1),
+          sma20: a.sma[20] == null ? null : +a.sma[20].toFixed(2),
+          sma50: a.sma[50] == null ? null : +a.sma[50].toFixed(2),
+          sma200: a.sma[200] == null ? null : +a.sma[200].toFixed(2),
+          trendPct: f && f.trendYearPct != null ? +f.trendYearPct.toFixed(1) : null,
+          forecast30: last && last.forecast != null ? +last.forecast.toFixed(2) : null,
+        },
+        news,
+      });
+    } catch {}
+  }
+  return {
+    now: new Date().toISOString(),
+    marketOpen: isMarketOpen(),
+    ideas: ideasData.results.map((r) => ({
+      secid: r.secid,
+      name: r.name,
+      price: r.price,
+      advice: r.advice,
+      score: r.score,
+      rsi: r.rsi,
+      drawdownPct: r.drawdownPct,
+      newsScore: r.newsScore,
+      reason: r.reason,
+    })),
+    alerts: alerts.list().slice(0, 8).map((a) => ({ secid: a.secid, name: a.name, changePct: +a.changePct.toFixed(2), price: a.price })),
+    focus,
+    portfolio,
+  };
+}
+
+async function handleAiChat(req, res) {
+  try {
+    if (!ai.isConfigured()) {
+      return sendJson(res, 501, { error: 'ИИ-помощник не настроен: нет ключа. Как подключить — в README, раздел «ИИ-помощник».' });
+    }
+    const body = await readJsonBody(req);
+    const message = typeof body.message === 'string' ? body.message.trim().slice(0, 2000) : '';
+    if (!message) return sendJson(res, 400, { error: 'Пустой вопрос' });
+    const rate = ai.checkRate();
+    if (!rate.ok) return sendJson(res, 429, { error: 'Лимит вопросов исчерпан (20 в час), попробуй через ' + Math.ceil(rate.retrySec / 60) + ' мин' });
+    const history = Array.isArray(body.history)
+      ? body.history.slice(-6)
+          .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+          .map((m) => ({ role: m.role, content: m.content.slice(0, 2000) }))
+      : [];
+    const portfolio = Array.isArray(body.portfolio)
+      ? body.portfolio.slice(0, 30)
+          .filter((p) => p && typeof p.secid === 'string' && TICKER_RE.test(p.secid) && +p.qty > 0)
+          .map((p) => ({
+            secid: p.secid.toUpperCase(),
+            qty: +p.qty,
+            buyPrice: +p.buyPrice > 0 ? +p.buyPrice : null,
+            divPerShare: +p.divPerShare > 0 ? +p.divPerShare : null,
+          }))
+      : [];
+    const context = await buildAiContext(message, portfolio);
+    const out = await ai.chat({ message, history, context });
+    return sendJson(res, 200, out);
+  } catch (e) {
+    return sendJson(res, 502, { error: String((e && e.message) || e) });
+  }
+}
+
 async function handleApi(res, url) {
   const p = url.pathname;
   try {
@@ -114,6 +307,9 @@ async function handleApi(res, url) {
     }
     if (p === '/api/alerts') {
       return sendJson(res, 200, { dropPct: alerts.DROP_PCT, alerts: alerts.list() });
+    }
+    if (p === '/api/ai/status') {
+      return sendJson(res, 200, ai.getStatus());
     }
     if (p === '/api/candles') {
       const secid = url.searchParams.get('secid') || '';
@@ -151,72 +347,8 @@ async function handleApi(res, url) {
     }
     if (p === '/api/ideas') {
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '20', 10) || 20, 1), 100);
-      const secs = await getSecurities();
-      let feed = null;
-      try {
-        feed = await newsMod.getFeed();
-      } catch {}
-      const universe = secs.rows
-        .filter((s) => s.issueSize != null && s.price != null)
-        .map((s) => ({ ...s, marketCap: s.issueSize * s.price }))
-        .sort((a, b) => b.marketCap - a.marketCap)
-        .slice(0, 40);
-      const results = [];
-      let idx = 0;
-      async function worker() {
-        while (idx < universe.length) {
-          const s = universe[idx++];
-          let d;
-          try {
-            d = await getCandles(s.secid, 730, 30 * MIN);
-          } catch {
-            continue;
-          }
-          if (!d.candles || d.candles.length < 30) continue;
-          const a = analysis.analyze(d.candles);
-          const cutoff = new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10);
-          let yearMax = 0;
-          for (const c of d.candles) {
-            if (c.t >= cutoff && c.c > yearMax) yearMax = c.c;
-          }
-          const drawdownPct = yearMax ? (s.price / yearMax - 1) * 100 : null;
-          const na = feed ? newsMod.matchCompany(feed.items, s.secid) : null;
-          let adv = advice(a, drawdownPct);
-          if (na && na.score <= -2 && adv.k === 'buy') adv = { k: 'wait', t: 'Понаблюдай', gate: 'news' };
-          let reason = reasonText(a, drawdownPct);
-          if (adv.gate === 'fall') reason += '; цена ещё ниже средней за 20 дней — падение не остановилось';
-          if (adv.gate === 'news') reason += '; новостной фон негативный';
-          results.push({
-            secid: s.secid,
-            name: s.name,
-            price: s.price,
-            changePct: s.changePct,
-            marketCap: s.marketCap,
-            score: a.score,
-            verdict: a.verdict,
-            rsi: a.rsi == null ? null : +a.rsi.toFixed(1),
-            drawdownPct: drawdownPct == null ? null : +drawdownPct.toFixed(1),
-            newsScore: na ? na.score : null,
-            newsPos: na ? na.pos : null,
-            newsNeg: na ? na.neg : null,
-            newsTitle: na && na.matched[0] ? na.matched[0].title : null,
-            advice: adv.t,
-            adviceKey: adv.k,
-            adviceGate: adv.gate || null,
-            reason,
-          });
-        }
-      }
-      await Promise.all(Array.from({ length: 6 }, worker));
-      const order = { buy: 0, small: 1, hold: 2, wait: 3, avoid: 4 };
-      results.sort((x, y) => (order[x.adviceKey] - order[y.adviceKey]) || (y.score - x.score));
-      return sendJson(res, 200, {
-        scanned: results.length,
-        stale: secs.stale,
-        newsSources: feed ? feed.sources.join(', ') : '',
-        newsErrors: feed ? feed.errors : [],
-        results: results.slice(0, limit),
-      });
+      const d = await buildIdeas(limit);
+      return sendJson(res, 200, d);
     }
     if (p === '/api/scan') {
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 1), 200);
@@ -288,6 +420,10 @@ function serveStatic(res, pathname) {
 }
 
 const server = http.createServer((req, res) => {
+  if (req.method === 'POST' && req.url.split('?')[0] === '/api/ai/chat') {
+    handleAiChat(req, res);
+    return;
+  }
   if (req.method !== 'GET') {
     res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('Method Not Allowed');

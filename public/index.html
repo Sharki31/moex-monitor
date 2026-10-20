@@ -25,6 +25,7 @@
   </nav>
   <span id="status" class="status"></span>
   <button id="btn-alerts" class="btn-bell" title="Резкие падения цены">Сигналы<span id="alerts-badge" class="badge-count" hidden></span></button>
+  <button id="btn-ai" class="btn-bell" title="ИИ-помощник по акциям">ИИ-помощник</button>
 </header>
 <div id="alerts-panel" class="alerts-panel" hidden>
   <div class="alerts-head">
@@ -32,6 +33,23 @@
     <button id="btn-notify" class="btn-notify">Включить уведомления</button>
   </div>
   <ul id="alerts-list"></ul>
+</div>
+<div id="ai-panel" class="ai-panel" hidden>
+  <div class="ai-head">
+    <span class="meta">Помощник видит идеи, сигналы и твой портфель. Ответы учебные, не инвестрекомендация.</span>
+    <button id="btn-ai-clear" class="btn-notify">Очистить</button>
+  </div>
+  <div id="ai-chat" class="ai-chat"></div>
+  <div class="ai-suggest">
+    <button data-q="Что лучше купить из идей прямо сейчас и почему?">Что купить?</button>
+    <button data-q="Объясни простыми словами, что такое дивидендный гэп.">Про дивиденды</button>
+    <button data-q="Оцени мой портфель: что в нём хорошо и чего не хватает?">Оценить портфель</button>
+  </div>
+  <div class="ai-input-row">
+    <input id="ai-text" type="text" placeholder="Спроси про акции: что купить, что такое RSI, почему упала SBER…">
+    <button id="btn-ai-send">Отправить</button>
+  </div>
+  <div id="ai-error" class="error"></div>
 </div>
 <main>
   <section id="tab-overview" class="panel active">
