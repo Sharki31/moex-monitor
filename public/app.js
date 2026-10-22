@@ -445,6 +445,7 @@ function addPosition() {
   $('#pf-buy').value = '';
   $('#pf-div').value = '';
   renderPortfolio();
+  pollSignals();
 }
 
 const calcIds = ['calc-goal', 'calc-monthly', 'calc-yield', 'calc-divgrowth', 'calc-pricegrowth', 'calc-inflation'];
@@ -607,9 +608,39 @@ function ideaNewsCell(r) {
 
 let currentAlerts = [];
 let seenAlertTs = +(localStorage.getItem('moex_alerts_seen') || 0);
+let currentBuys = [];
+let currentPfSignals = [];
+let seenSigTs = +(localStorage.getItem('moex_sig_seen') || 0);
+
+const SIG_COOLDOWN_MS = 12 * 3600 * 1000;
+
+function sigCooldownMap() {
+  try {
+    const m = JSON.parse(localStorage.getItem('moex_sig_cooldown') || '{}');
+    return m && typeof m === 'object' ? m : {};
+  } catch {
+    return {};
+  }
+}
+
+function sigNotifiedRecently(key) {
+  const ts = sigCooldownMap()[key];
+  return ts != null && Date.now() - ts < SIG_COOLDOWN_MS;
+}
+
+function markSigNotified(key) {
+  const m = sigCooldownMap();
+  const now = Date.now();
+  m[key] = now;
+  for (const k of Object.keys(m)) {
+    if (now - m[k] > SIG_COOLDOWN_MS) delete m[k];
+  }
+  localStorage.setItem('moex_sig_cooldown', JSON.stringify(m));
+}
 
 function updateAlertBadge() {
-  const n = currentAlerts.filter((a) => a.ts > seenAlertTs).length;
+  const n = currentAlerts.filter((a) => a.ts > seenAlertTs).length +
+    currentBuys.filter((b) => b.ts > seenSigTs).length;
   $('#alerts-badge').hidden = !n;
   $('#alerts-badge').textContent = n;
 }
@@ -646,6 +677,84 @@ async function pollAlerts() {
       updateAlertBadge();
     }
   } catch {}
+}
+
+function actionClass(a) {
+  if (a === 'buy_more') return 'b-strongbuy';
+  if (a === 'sell') return 'b-sell';
+  return 'b-hold';
+}
+
+function renderBuys() {
+  $('#buys-list').innerHTML = currentBuys.length
+    ? currentBuys.slice(0, 8).map((b) =>
+      '<li data-secid="' + b.secid + '" title="' + esc(b.reason) + '"><span class="mono">' + b.secid + '</span>' +
+      '<span class="a-name">' + b.name + '</span>' +
+      '<span class="num">' + fmtPrice(b.price) + ' ₽</span>' +
+      '<span><span class="badge ' + adviceClass(b.adviceKey || 'hold') + '">' + b.advice + '</span></span>' +
+      '<span class="a-time">' + new Date(b.ts).toLocaleTimeString('ru-RU') + '</span></li>').join('')
+    : '<li class="a-empty">Точек входа сейчас нет — рынок сканируется каждые 30 минут</li>';
+}
+
+function renderPfSignals() {
+  const section = $('#pf-signals-section');
+  if (!portfolio.length) {
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+  $('#pf-signals-list').innerHTML = currentPfSignals.length
+    ? currentPfSignals.map((r) => {
+      const short = r.action === 'buy_more' ? 'Докупить' : r.action === 'sell' ? 'Продать' : 'Держать';
+      const tip = r.actionText + '. ' + r.reason +
+        (r.forecast30 != null ? '. Прогноз на 30 дней: ' + fmtPrice(r.forecast30) + ' ₽' : '');
+      return '<li data-secid="' + r.secid + '" title="' + esc(tip) + '"><span class="mono">' + r.secid + '</span>' +
+        '<span class="a-name">' + r.name + '</span>' +
+        '<span class="num">' + fmtPrice(r.price) + ' ₽</span>' +
+        '<span><span class="badge ' + actionClass(r.action) + '">' + short + '</span></span></li>';
+    }).join('')
+    : '<li class="a-empty">Считаю сигналы по портфелю…</li>';
+}
+
+function notifySignals() {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  currentBuys.filter((b) => !sigNotifiedRecently('buy:' + b.secid)).slice(0, 2).forEach((b) => {
+    const n = new Notification(b.secid + ' — возможность купить', {
+      body: b.name + ' · ' + fmtPrice(b.price) + ' ₽ · ' + b.advice + '. ' + b.reason + '. Не инвестрекомендация.',
+      icon: '/icon-192.png',
+      tag: 'moex-sig-buy-' + b.secid,
+    });
+    n.onclick = () => { window.focus(); openAnalysis(b.secid); n.close(); };
+    markSigNotified('buy:' + b.secid);
+  });
+  currentPfSignals.filter((r) => r.action !== 'hold' && !sigNotifiedRecently('pf:' + r.action + ':' + r.secid)).slice(0, 3).forEach((r) => {
+    const title = r.action === 'sell' ? r.secid + ' — сигнал продать' : r.secid + ' — можно докупить';
+    const n = new Notification(title, {
+      body: r.name + ' · ' + fmtPrice(r.price) + ' ₽ · ' + r.actionText + '. Не инвестрекомендация.',
+      icon: '/icon-192.png',
+      tag: 'moex-sig-pf-' + r.secid,
+    });
+    n.onclick = () => { window.focus(); openAnalysis(r.secid); n.close(); };
+    markSigNotified('pf:' + r.action + ':' + r.secid);
+  });
+}
+
+let sigBusy = false;
+
+async function pollSignals() {
+  if (sigBusy) return;
+  sigBusy = true;
+  try {
+    const watch = portfolio.map((p) => p.secid).join(',');
+    const d = await api('/api/signals' + (watch ? '?watch=' + encodeURIComponent(watch) : ''));
+    currentBuys = d.buys || [];
+    currentPfSignals = (d.portfolio && d.portfolio.results) || [];
+    renderBuys();
+    renderPfSignals();
+    updateAlertBadge();
+    notifySignals();
+  } catch {}
+  sigBusy = false;
 }
 
 function refreshNotifyButton() {
@@ -775,6 +884,7 @@ document.addEventListener('DOMContentLoaded', () => {
       portfolio.splice(+del.dataset.del, 1);
       savePortfolio();
       renderPortfolio();
+      pollSignals();
       return;
     }
     const tr = e.target.closest('tr[data-secid]');
@@ -804,10 +914,26 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!p.hidden) {
       seenAlertTs = Date.now();
       localStorage.setItem('moex_alerts_seen', String(seenAlertTs));
+      seenSigTs = Date.now();
+      localStorage.setItem('moex_sig_seen', String(seenSigTs));
       updateAlertBadge();
     }
   });
   $('#alerts-list').addEventListener('click', (e) => {
+    const li = e.target.closest('li[data-secid]');
+    if (li) {
+      $('#alerts-panel').hidden = true;
+      openAnalysis(li.dataset.secid);
+    }
+  });
+  $('#buys-list').addEventListener('click', (e) => {
+    const li = e.target.closest('li[data-secid]');
+    if (li) {
+      $('#alerts-panel').hidden = true;
+      openAnalysis(li.dataset.secid);
+    }
+  });
+  $('#pf-signals-list').addEventListener('click', (e) => {
     const li = e.target.closest('li[data-secid]');
     if (li) {
       $('#alerts-panel').hidden = true;
@@ -824,6 +950,10 @@ document.addEventListener('DOMContentLoaded', () => {
   renderAlerts();
   pollAlerts();
   setInterval(pollAlerts, 60000);
+  renderBuys();
+  renderPfSignals();
+  pollSignals();
+  setInterval(pollSignals, 5 * 60000);
   $('#btn-ai').addEventListener('click', () => {
     const p = $('#ai-panel');
     p.hidden = !p.hidden;

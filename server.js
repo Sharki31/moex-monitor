@@ -11,6 +11,8 @@ const forecast = require('./lib/forecast');
 const newsMod = require('./lib/news');
 const alerts = require('./lib/alerts');
 const ai = require('./lib/ai');
+const signals = require('./lib/signals');
+const { advice, reasonText } = require('./lib/advice');
 
 const PORT = process.env.PORT || 3000;
 const HOST = '0.0.0.0';
@@ -74,34 +76,7 @@ async function getCandles(secid, days, ttl) {
   return { candles: data, stale: false };
 }
 
-function advice(a, drawdownPct) {
-  const rsi = a.rsi;
-  const stabilized = a.sma[20] != null && a.price != null && a.price > a.sma[20];
-  if (a.score <= -2) return { k: 'avoid', t: 'Не покупать сейчас' };
-  if (rsi != null && rsi < 35 && a.score >= -1) {
-    if (stabilized) return { k: 'buy', t: 'Хорошая точка входа' };
-    return { k: 'wait', t: 'Понаблюдай', gate: 'fall' };
-  }
-  if (a.score >= 2 && drawdownPct != null && drawdownPct <= -10) {
-    if (stabilized) return { k: 'buy', t: 'Хорошая точка входа' };
-    return { k: 'wait', t: 'Понаблюдай', gate: 'fall' };
-  }
-  if (a.score >= 1 || (drawdownPct != null && drawdownPct <= -25 && a.score >= -1)) {
-    return { k: 'small', t: 'Можно купить понемногу' };
-  }
-  if (a.score >= -1) return { k: 'hold', t: 'Держать / присмотреться' };
-  return { k: 'wait', t: 'Подожди' };
-}
-
-function reasonText(a, drawdownPct) {
-  const parts = [];
-  if (a.rsi != null && a.rsi < 35) parts.push('RSI ' + a.rsi.toFixed(0) + ' — перепроданность');
-  if (drawdownPct != null && drawdownPct <= -20) parts.push('на ' + Math.round(Math.abs(drawdownPct)) + '% ниже максимума за год');
-  if (a.score >= 2) parts.push('сильные сигналы (' + a.verdict.toLowerCase() + ')');
-  else if (a.score >= 1) parts.push('слабый перевес вверх');
-  if (!parts.length) parts.push('ярких сигналов нет');
-  return parts.join(', ');
-}
+signals.init({ getSecurities, getCandles, advice, reasonText });
 
 async function buildIdeas(limit) {
   const secs = await getSecurities();
@@ -350,6 +325,15 @@ async function handleApi(res, url) {
       const d = await buildIdeas(limit);
       return sendJson(res, 200, d);
     }
+    if (p === '/api/signals') {
+      const watch = (url.searchParams.get('watch') || '')
+        .split(',')
+        .map((s) => s.trim().toUpperCase())
+        .filter((s) => TICKER_RE.test(s))
+        .slice(0, 30);
+      const portfolio = await signals.portfolioAdvice(watch);
+      return sendJson(res, 200, { buys: signals.list(), scan: signals.status(), portfolio });
+    }
     if (p === '/api/scan') {
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 1), 200);
       const secs = await getSecurities();
@@ -474,6 +458,7 @@ server.listen(PORT, HOST, () => {
   console.log('Фоновый прогрев кэша топ-100 бумаг запустится через 2 с…');
   setTimeout(checkAlerts, 10000);
   setInterval(checkAlerts, 5 * MIN);
+  signals.start();
   setTimeout(async () => {
     try {
       const secs = await moex.fetchSecurities();

@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE = 'moex-static-v2';
+const CACHE = 'moex-static-v3';
 const ASSETS = [
   '/',
   '/index.html',

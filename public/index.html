@@ -29,10 +29,21 @@
 </header>
 <div id="alerts-panel" class="alerts-panel" hidden>
   <div class="alerts-head">
-    <span class="meta">Падение от 5% за день при обороте от 10 млн ₽ — возможный сигнал «срочно продавать»</span>
+    <span class="meta">Сигналы обновляются сами: покупки — каждые 30 мин, портфель — каждые 5 мин. Не инвестрекомендация.</span>
     <button id="btn-notify" class="btn-notify">Включить уведомления</button>
   </div>
-  <ul id="alerts-list"></ul>
+  <div class="alerts-section">
+    <h4>Возможность купить</h4>
+    <ul id="buys-list" class="alerts-list"></ul>
+  </div>
+  <div class="alerts-section" id="pf-signals-section" hidden>
+    <h4>Твой портфель: докупить / продать</h4>
+    <ul id="pf-signals-list" class="alerts-list"></ul>
+  </div>
+  <div class="alerts-section">
+    <h4>Резкие падения <span class="meta">от −5% за день при обороте от 10 млн ₽</span></h4>
+    <ul id="alerts-list" class="alerts-list"></ul>
+  </div>
 </div>
 <div id="ai-panel" class="ai-panel" hidden>
   <div class="ai-head">
