@@ -290,14 +290,20 @@ async function handleApi(res, url) {
       const secid = url.searchParams.get('secid') || '';
       const days = Math.min(Math.max(parseInt(url.searchParams.get('days') || '365', 10) || 365, 30), 1460);
       if (!TICKER_RE.test(secid)) return sendJson(res, 400, { error: 'Некорректный тикер' });
-      const d = await getCandles(secid, days, 60 * MIN);
-      return sendJson(res, 200, { secid, ...d });
+      const rid = moex.resolveSecid(secid);
+      const d = await getCandles(rid, days, 60 * MIN);
+      return sendJson(res, 200, { secid: rid, ...d });
     }
     if (p === '/api/analysis') {
-      const secid = url.searchParams.get('secid') || '';
+      const secid = moex.resolveSecid(url.searchParams.get('secid') || '');
       if (!TICKER_RE.test(secid)) return sendJson(res, 400, { error: 'Некорректный тикер' });
       const d = await getCandles(secid, 730, 60 * MIN);
       if (!d.candles.length) return sendJson(res, 404, { error: 'Нет данных по ' + secid });
+      const lastC = d.candles[d.candles.length - 1];
+      const staleCutoff = new Date(Date.now() - 20 * 86400000).toISOString().slice(0, 10);
+      if (!lastC || lastC.t < staleCutoff) {
+        return sendJson(res, 404, { error: 'Нет актуальных данных по ' + secid + ' — бумага не торгуется' });
+      }
       const result = analysis.analyze(d.candles);
       result.forecast = forecast.forecast(d.candles);
       result.secid = secid;
@@ -305,7 +311,7 @@ async function handleApi(res, url) {
       return sendJson(res, 200, result);
     }
     if (p === '/api/news') {
-      const secid = url.searchParams.get('secid') || '';
+      const secid = moex.resolveSecid(url.searchParams.get('secid') || '');
       if (!TICKER_RE.test(secid)) return sendJson(res, 400, { error: 'Некорректный тикер' });
       const feed = await newsMod.getFeed();
       const na = newsMod.matchCompany(feed.items, secid);
@@ -328,7 +334,7 @@ async function handleApi(res, url) {
     if (p === '/api/signals') {
       const watch = (url.searchParams.get('watch') || '')
         .split(',')
-        .map((s) => s.trim().toUpperCase())
+        .map((s) => moex.resolveSecid(s.trim().toUpperCase()))
         .filter((s) => TICKER_RE.test(s))
         .slice(0, 30);
       const portfolio = await signals.portfolioAdvice(watch);

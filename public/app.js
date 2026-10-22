@@ -280,6 +280,8 @@ async function runScan() {
   }
 }
 
+const SECID_ALIAS = { TCSG: 'T' };
+
 let portfolio = loadPortfolio();
 let pfBusy = false;
 
@@ -290,7 +292,7 @@ function loadPortfolio() {
     return raw
       .filter((p) => p && typeof p.secid === 'string' && +p.qty > 0)
       .map((p) => ({
-        secid: p.secid,
+        secid: SECID_ALIAS[p.secid] || p.secid,
         qty: +p.qty,
         buyPrice: p.buyPrice != null && +p.buyPrice > 0 ? +p.buyPrice : null,
         divPerShare: p.divPerShare != null && +p.divPerShare > 0 ? +p.divPerShare : null,
